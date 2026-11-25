@@ -1,0 +1,100 @@
+# fusion-link（设备侧连接守护）
+
+Fusion 本地优先生态的连接守护进程，是 fusion-mlx.cn 云端控制台的设备侧另一半：运行在用户本地 Mac 上的常驻守护，向云端 broker 发起**纯出站** WSS 连接，上报设备健康状态，把云端发起的任务转交给本地 `fusion-gateway` 执行，并将进度实时回传浏览器。
+
+一句话：**fusion-link = 本地 Fusion 系统在 fusion-mlx.cn 上的"在线状态"与"可触达性"。**
+
+- PRD：monorepo 根目录 `architecture/fusion-link-prd-1125.md`
+- M1 MVP 范围：FR-1 / FR-2 / FR-3 / FR-4 / FR-6
+- 云端 broker：独立二进制，位于 `fusion-ops` 仓库（PRD §11.1）
+
+## 架构
+
+```
+[浏览器] --HTTPS--> [fusion-site / VPS]
+                          | broker（VPS，仅 127.0.0.1，nginx 不暴露）
+                          ^ WSS（设备主动出站，token + 设备指纹鉴权）
+                      [fusion-link 守护（本仓库，本地 Mac，fusion-sv 托管）]
+                          | 仅本地回环 HTTP
+                      [fusion-gateway :11432 -> mlx/rag/artifacts/office（全本地）]
+```
+
+零公网入站：守护进程只拨出连接。任务全部本地执行；默认只有摘要、进度和可选的产物预览离开本机，文件全文永不上云。
+
+## WSS 协议（PRD §7）
+
+信封：`{v: 1, type, ts, device_id, seq, payload}`，全 JSON，seq + ack 保证可靠有序。
+
+| type | 方向 | 说明 |
+|---|---|---|
+| `hello` / `hello_ack` | 上行 | 注册：凭证、版本、能力集 |
+| `heartbeat` | 上行 | 30s 心跳 + 本地服务健康快照 |
+| `task.dispatch` | 下行 | 任务指令（id、类型、参数、TTL） |
+| `task.event` | 上行 | 状态机事件：pending / running / awaiting_local_confirm / succeeded / failed / cancelled |
+| `task.result` | 上行 | 结果摘要 + 产物引用 |
+| `config.update` | 下行 | 策略/配额变更 |
+| `ack` | 双向 | 确认收到 `ack_seq` 及之前的消息 |
+| `error` | 双向 | `E_AUTH` / `E_QUOTA` / `E_OFFLINE` / `E_UNSUPPORTED` / `E_LOCAL_FAIL` |
+
+所有上行消息写入持久化 outbox（`~/.fusion-link/outbox.json`），broker 确认前反复重发——断线、崩溃后事件不丢（FR-6）。重连采用指数退避 + 抖动（1s 起步，60s 封顶）。
+
+## 构建与测试
+
+需要 Rust 1.85+（edition 2024）。
+
+```bash
+cargo build --release
+cargo test                                    # 单元 + 集成（mock broker / mock gateway）
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all --check
+```
+
+## 使用
+
+```bash
+# 1. 绑定设备（绑定码来自 fusion-mlx.cn 控制台）
+fusion-link bind <code>
+
+# 2. 查看状态
+fusion-link status
+
+# 3. 运行守护（前台；start.sh 管理 pidfile + 日志）
+./start.sh start
+./start.sh status
+./start.sh log
+./start.sh stop
+```
+
+默认任务路由：`shell.chat` -> `POST http://127.0.0.1:11432/api/v1/shell/chat/completions`。不支持的任务类型以 `E_UNSUPPORTED` + 原因明确拒绝（FR-3）。
+
+## 配置
+
+`~/.fusion-link/config.toml`（所有键可选；文件存在时以文件为准）。环境变量覆盖：`FUSION_LINK_BROKER_URL`、`FUSION_LINK_BIND_URL`、`FUSION_LINK_GATEWAY_URL`、`FUSION_LINK_GATEWAY_TOKEN`、`FUSION_LINK_STATE_DIR`、`FUSION_LINK_HEARTBEAT_SECS`。
+
+| 键 | 默认值 |
+|---|---|
+| `broker_url` | `wss://fusion-mlx.cn/link/ws` |
+| `bind_url` | `https://fusion-mlx.cn/api/link/bind` |
+| `gateway_url` | `http://127.0.0.1:11432` |
+| `heartbeat_secs` | `30` |
+| `state_dir` | `~/.fusion-link` |
+| `task_routes` | `shell.chat` 路由 |
+| `probes` | mlx :11434、gateway :11432、rag :11436、artifacts :11451、office :11485、office-api :11492 |
+
+健康快照只含服务名 + 布尔状态（NFR-2）；心跳小于 1KB（NFR-3）。
+
+## 凭证存储
+
+设备凭证（`device_id` + token + 指纹）通过 `security` CLI 存入 macOS 登录钥匙串（service 名 `fusion-link`）。指纹取自 `IOPlatformUUID`。`fusion-link unbind` 删除凭证与本地 outbox 状态。
+
+## 托管
+
+`start.sh` 遵循 fusion-supervisor 托管契约（NFR-6）：pidfile 在 `~/.fusion-link/fusion-link.pid`，日志在 `~/.fusion-link/fusion-link.log`。注册纳管后由 `fusion-sv` 统一启停与崩溃恢复。
+
+## 状态
+
+M1 MVP（2026-11）：设备侧 FR-1/2/3/4/6 已实现。Broker（fusion-ops 仓库）与控制台页面为独立交付物；默认 `broker_url` 为占位值，broker 端点上线前不可用。M2 范围（FR-5/7/8/11/12）见 PRD 里程碑。
+
+## 许可证
+
+Apache-2.0
