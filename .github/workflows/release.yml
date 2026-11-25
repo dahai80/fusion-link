@@ -32,6 +32,10 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-zigbuild
+      - name: Install zig (linker for cross targets)
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
