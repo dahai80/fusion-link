@@ -38,9 +38,29 @@ Envelope: `{v: 1, type, ts, device_id, seq, payload}`, JSON only, seq + ack for 
 
 All uplink messages are journaled in a persistent outbox (`~/.fusion-link/outbox.json`) and replayed until the broker acks them — events survive disconnects and crashes (FR-6). Reconnect uses exponential backoff with jitter (1s base, 60s cap).
 
-## Build & test
+## Install
 
-Requires Rust 1.85+ (edition 2024).
+**Homebrew** (macOS / Linux):
+
+```bash
+brew install dahai80/tap/fusion-link
+```
+
+**pip** (ships the compiled binary as a Python wheel):
+
+```bash
+pip install fusion-link
+```
+
+**From source**: requires Rust 1.85+ (edition 2024).
+
+```bash
+cargo build --release
+```
+
+Prebuilt binaries (`.tar.gz` + sha256) for `aarch64/x86_64-apple-darwin` and `x86_64-unknown-linux-musl` are attached to each [GitHub release](https://github.com/dahai80/fusion-link/releases).
+
+## Build & test
 
 ```bash
 cargo build --release

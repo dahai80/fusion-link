@@ -38,9 +38,29 @@ Fusion 本地优先生态的连接守护进程，是 fusion-mlx.cn 云端控制�
 
 所有上行消息写入持久化 outbox（`~/.fusion-link/outbox.json`），broker 确认前反复重发——断线、崩溃后事件不丢（FR-6）。重连采用指数退避 + 抖动（1s 起步，60s 封顶）。
 
-## 构建与测试
+## 安装
 
-需要 Rust 1.85+（edition 2024）。
+**Homebrew**（macOS / Linux）：
+
+```bash
+brew install dahai80/tap/fusion-link
+```
+
+**pip**（以 Python wheel 形式分发编译好的二进制）：
+
+```bash
+pip install fusion-link
+```
+
+**源码构建**：需要 Rust 1.85+（edition 2024）。
+
+```bash
+cargo build --release
+```
+
+每个 [GitHub release](https://github.com/dahai80/fusion-link/releases) 附带 `aarch64/x86_64-apple-darwin` 与 `x86_64-unknown-linux-musl` 预编译二进制（`.tar.gz` + sha256）。
+
+## 构建与测试
 
 ```bash
 cargo build --release
