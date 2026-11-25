@@ -1,0 +1,29 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "fusion-link"
+description = "Fusion device-side connection daemon: outbound WSS to the cloud broker, task relay to local fusion-gateway"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+authors = [{ name = "dahai80" }]
+readme = "README.md"
+keywords = ["fusion", "daemon", "wss", "local-first"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Rust",
+    "Topic :: System :: Networking",
+]
+
+[project.urls]
+Homepage = "https://github.com/dahai80/fusion-link"
+Repository = "https://github.com/dahai80/fusion-link"
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "Cargo.toml"

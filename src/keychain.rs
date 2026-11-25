@@ -88,9 +88,10 @@ pub fn device_fingerprint() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    // macOS-only: security CLI + ioreg do not exist on Linux CI runners.
+    #[cfg(target_os = "macos")]
     use super::*;
 
-    // macOS-only: security CLI + ioreg do not exist on Linux CI runners.
     #[cfg(target_os = "macos")]
     #[test]
     fn fingerprint_is_deterministic_and_prefixed() {
