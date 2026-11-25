@@ -19,6 +19,9 @@ type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 const RECONNECT_BASE_MS: u64 = 1_000;
 const RECONNECT_MAX_MS: u64 = 60_000;
+/// Broker does not ack task events either; cap the journal so replay stays
+/// bounded across reconnects (heartbeats are cleared on hello_ack already).
+const MAX_OUTBOX_ENTRIES: usize = 500;
 
 pub async fn run(cfg: Config, cred: Credential, shutdown: CancellationToken) -> Result<(), String> {
     cfg.ensure_state_dir()?;
@@ -233,6 +236,9 @@ async fn handle_text(
     match env.msg_type {
         MsgType::HelloAck => {
             info!("broker accepted registration (hello_ack)");
+            // Broker does not ack heartbeats; hello_ack proves liveness.
+            outbox.drop_heartbeats()?;
+            outbox.prune(MAX_OUTBOX_ENTRIES)?;
         }
         MsgType::Ack => match serde_json::from_value::<AckPayload>(env.payload) {
             Ok(ack) => {

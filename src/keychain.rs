@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 const SERVICE: &str = "fusion-link";
+const KEY_ACCOUNT: &str = "device";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credential {
@@ -30,16 +31,59 @@ fn run_security(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+// The daemon credential lives under a fixed service+account pair so re-binds
+// update in place and lookups are unambiguous even if other entries with the
+// same service exist (e.g. entries written by older builds).
 pub fn store(cred: &Credential) -> Result<(), String> {
+    store_in(SERVICE, cred)
+}
+
+pub fn load() -> Result<Credential, String> {
+    match load_from(SERVICE, KEY_ACCOUNT) {
+        Ok(cred) => Ok(cred),
+        Err(new_err) => match load_legacy() {
+            // Older builds stored under account = device_id; migrate in place.
+            Ok(legacy) => {
+                tracing::info!(
+                    "migrating keychain credential to fixed account (device {})",
+                    legacy.device_id
+                );
+                store_in(SERVICE, &legacy)?;
+                let _ = run_security(&[
+                    "delete-generic-password",
+                    "-s",
+                    SERVICE,
+                    "-a",
+                    &legacy.device_id,
+                ]);
+                Ok(legacy)
+            }
+            Err(_) => Err(new_err),
+        },
+    }
+}
+
+pub fn delete() -> Result<(), String> {
+    match run_security(&["delete-generic-password", "-s", SERVICE, "-a", KEY_ACCOUNT]) {
+        Ok(_) => {
+            tracing::info!("credential deleted from keychain");
+            Ok(())
+        }
+        Err(e) if e.contains("could not be found") => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+fn store_in(service: &str, cred: &Credential) -> Result<(), String> {
     let secret =
         serde_json::to_string(cred).map_err(|e| format!("credential serialize failed: {e}"))?;
     run_security(&[
         "add-generic-password",
         "-U",
         "-s",
-        SERVICE,
+        service,
         "-a",
-        &cred.device_id,
+        KEY_ACCOUNT,
         "-w",
         &secret,
     ])
@@ -51,20 +95,14 @@ pub fn store(cred: &Credential) -> Result<(), String> {
     })
 }
 
-pub fn load() -> Result<Credential, String> {
-    let raw = run_security(&["find-generic-password", "-s", SERVICE, "-w"])?;
+fn load_from(service: &str, account: &str) -> Result<Credential, String> {
+    let raw = run_security(&["find-generic-password", "-s", service, "-a", account, "-w"])?;
     serde_json::from_str(&raw).map_err(|e| format!("credential parse failed: {e}"))
 }
 
-pub fn delete() -> Result<(), String> {
-    match run_security(&["delete-generic-password", "-s", SERVICE]) {
-        Ok(_) => {
-            tracing::info!("credential deleted from keychain");
-            Ok(())
-        }
-        Err(e) if e.contains("could not be found") => Ok(()),
-        Err(e) => Err(e),
-    }
+fn load_legacy() -> Result<Credential, String> {
+    let raw = run_security(&["find-generic-password", "-s", SERVICE, "-w"])?;
+    serde_json::from_str(&raw).map_err(|e| format!("credential parse failed: {e}"))
 }
 
 /// Stable device fingerprint: IOPlatformUUID (no hardware serial exposure).
@@ -105,16 +143,18 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn keychain_roundtrip() {
+        // Isolated service: never touches the real daemon credential entry.
+        let service = "fusion-link-test";
         let cred = Credential {
             device_id: format!("test-{}", std::process::id()),
             token: "tok-abc".into(),
             fingerprint: "fp-test".into(),
         };
-        store(&cred).unwrap();
-        let loaded = load().unwrap();
+        store_in(service, &cred).unwrap();
+        let loaded = load_from(service, KEY_ACCOUNT).unwrap();
         assert_eq!(loaded.device_id, cred.device_id);
         assert_eq!(loaded.token, cred.token);
-        delete().unwrap();
-        assert!(load().is_err());
+        run_security(&["delete-generic-password", "-s", service, "-a", KEY_ACCOUNT]).unwrap();
+        assert!(load_from(service, KEY_ACCOUNT).is_err());
     }
 }

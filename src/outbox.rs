@@ -64,6 +64,38 @@ impl Outbox {
         Ok(dropped)
     }
 
+    /// The broker never acks heartbeats; they are re-delivered (and re-persisted)
+    /// on every reconnect. hello_ack proves the channel is alive, so drop them.
+    pub fn drop_heartbeats(&mut self) -> Result<usize, String> {
+        let before = self.state.pending.len();
+        self.state
+            .pending
+            .retain(|e| e.msg_type != crate::protocol::MsgType::Heartbeat);
+        let dropped = before - self.state.pending.len();
+        if dropped > 0 {
+            tracing::debug!("outbox: dropped {} heartbeat entries on hello_ack", dropped);
+            self.save()?;
+        }
+        Ok(dropped)
+    }
+
+    /// Hard cap on journaled messages. Without broker-side acks the pending
+    /// list grows forever; keep the newest entries and drop the oldest.
+    pub fn prune(&mut self, max_entries: usize) -> Result<usize, String> {
+        if self.state.pending.len() <= max_entries {
+            return Ok(0);
+        }
+        let overflow = self.state.pending.len() - max_entries;
+        self.state.pending.drain(0..overflow);
+        tracing::info!(
+            "outbox: pruned {} oldest entries (cap {})",
+            overflow,
+            max_entries
+        );
+        self.save()?;
+        Ok(overflow)
+    }
+
     fn save(&self) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)
@@ -137,5 +169,35 @@ mod tests {
         assert_eq!(outbox.ack(99).unwrap(), 1);
         assert_eq!(outbox.pending_count(), 0);
         assert_eq!(outbox.ack(99).unwrap(), 0);
+    }
+
+    fn heartbeat_env() -> Envelope {
+        Envelope::new(MsgType::Heartbeat, "dev-1", 0, serde_json::json!({}))
+    }
+
+    #[test]
+    fn drop_heartbeats_keeps_other_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut outbox = Outbox::load(dir.path().join("outbox.json"));
+        outbox.push(event_env("t1")).unwrap();
+        outbox.push(heartbeat_env()).unwrap();
+        outbox.push(event_env("t2")).unwrap();
+        outbox.push(heartbeat_env()).unwrap();
+        assert_eq!(outbox.drop_heartbeats().unwrap(), 2);
+        assert_eq!(outbox.pending_count(), 2);
+        assert_eq!(outbox.drop_heartbeats().unwrap(), 0);
+    }
+
+    #[test]
+    fn prune_keeps_newest_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut outbox = Outbox::load(dir.path().join("outbox.json"));
+        for i in 0..5 {
+            outbox.push(event_env(&format!("t{i}"))).unwrap();
+        }
+        assert_eq!(outbox.prune(3).unwrap(), 2);
+        let seqs: Vec<u64> = outbox.pending().iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, vec![2, 3, 4]);
+        assert_eq!(outbox.prune(3).unwrap(), 0);
     }
 }

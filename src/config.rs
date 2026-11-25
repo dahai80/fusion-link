@@ -47,7 +47,9 @@ impl Default for Config {
             bind_url: "https://fusion-mlx.cn/api/link/bind".to_string(),
             gateway_url: "http://127.0.0.1:11432".to_string(),
             gateway_token: None,
-            heartbeat_secs: 30,
+            // Broker read deadline is 30s; a 30s heartbeat loses that race.
+            // Stay strictly under it (verified stable at 15 on prod).
+            heartbeat_secs: 15,
             state_dir: default_state_dir(),
             task_routes,
             probes: default_probes(),
@@ -147,6 +149,9 @@ mod tests {
         let cfg = Config::default();
         assert!(cfg.broker_url.starts_with("wss://"));
         assert!(cfg.gateway_url.contains("11432"));
+        // broker read deadline is 30s; heartbeat must stay under it
+        assert_eq!(cfg.heartbeat_secs, 15);
+        assert!(cfg.heartbeat_secs < 30);
         let urls: Vec<&str> = cfg.probes.iter().map(|p| p.url.as_str()).collect();
         assert!(urls.iter().any(|u| u.contains("11434")));
         assert!(urls.iter().any(|u| u.contains("11436")));

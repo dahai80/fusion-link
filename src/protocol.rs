@@ -117,6 +117,9 @@ pub struct ServiceHealth {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskDispatchPayload {
     pub task_id: String,
+    /// Broker (fusion-ops) sends this as "type"; PRD draft said "task_type".
+    /// Accept both, keep "task_type" on the wire for our own uplink frames.
+    #[serde(alias = "type")]
     pub task_type: String,
     pub params: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -151,6 +154,9 @@ pub struct AckPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorPayload {
     pub code: ErrorCode,
+    /// Broker (fusion-ops) uses "detail" on the wire; PRD draft said "message".
+    /// Unified on "detail" in both directions, "message" accepted on parse.
+    #[serde(rename = "detail", alias = "message")]
     pub message: String,
 }
 
@@ -207,5 +213,35 @@ mod tests {
     #[test]
     fn malformed_json_rejected() {
         assert!(Envelope::from_json("{not json").is_err());
+    }
+
+    #[test]
+    fn dispatch_accepts_broker_type_field() {
+        // fusion-ops broker sends {"task_id", "type", "params"}
+        let raw = r#"{"task_id":"t-9","type":"summarize","params":{}}"#;
+        let p: TaskDispatchPayload = serde_json::from_str(raw).unwrap();
+        assert_eq!(p.task_type, "summarize");
+    }
+
+    #[test]
+    fn error_payload_unified_on_detail() {
+        let payload = ErrorPayload {
+            code: ErrorCode::Quota,
+            message: "over quota".into(),
+        };
+        let raw = serde_json::to_string(&payload).unwrap();
+        assert!(raw.contains("\"detail\""), "serialize uses detail: {raw}");
+        assert!(
+            !raw.contains("\"message\""),
+            "no message key on wire: {raw}"
+        );
+        // broker frame {"code","detail"} parses
+        let back: ErrorPayload =
+            serde_json::from_str(r#"{"code":"E_QUOTA","detail":"over quota"}"#).unwrap();
+        assert_eq!(back.message, "over quota");
+        // legacy {"code","message"} also parses
+        let legacy: ErrorPayload =
+            serde_json::from_str(r#"{"code":"E_QUOTA","message":"over quota"}"#).unwrap();
+        assert_eq!(legacy.message, "over quota");
     }
 }

@@ -36,7 +36,7 @@ Fusion 本地优先生态的连接守护进程，是 fusion-mlx.cn 云端控制�
 | `ack` | 双向 | 确认收到 `ack_seq` 及之前的消息 |
 | `error` | 双向 | `E_AUTH` / `E_QUOTA` / `E_OFFLINE` / `E_UNSUPPORTED` / `E_LOCAL_FAIL` |
 
-所有上行消息写入持久化 outbox（`~/.fusion-link/outbox.json`），broker 确认前反复重发——断线、崩溃后事件不丢（FR-6）。重连采用指数退避 + 抖动（1s 起步，60s 封顶）。
+所有上行消息写入持久化 outbox（`~/.fusion-link/outbox.json`），broker 确认前反复重发——断线、崩溃后事件不丢（FR-6）。因当前 broker 不 ack 心跳与任务事件，`hello_ack` 时清空心跳条目，日志上限 500 条（最旧先淘汰）。重连采用指数退避 + 抖动（1s 起步，60s 封顶）。
 
 ## 安装
 
@@ -96,7 +96,7 @@ fusion-link status
 | `broker_url` | `wss://fusion-mlx.cn/link/ws` |
 | `bind_url` | `https://fusion-mlx.cn/api/link/bind` |
 | `gateway_url` | `http://127.0.0.1:11432` |
-| `heartbeat_secs` | `30` |
+| `heartbeat_secs` | `15`（broker 读超时 30s，心跳必须小于它） |
 | `state_dir` | `~/.fusion-link` |
 | `task_routes` | `shell.chat` 路由 |
 | `probes` | mlx :11434、gateway :11432、rag :11436、artifacts :11451、office :11485、office-api :11492 |

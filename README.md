@@ -36,7 +36,7 @@ Envelope: `{v: 1, type, ts, device_id, seq, payload}`, JSON only, seq + ack for 
 | `ack` | both | delivery acknowledgement up to `ack_seq` |
 | `error` | both | `E_AUTH` / `E_QUOTA` / `E_OFFLINE` / `E_UNSUPPORTED` / `E_LOCAL_FAIL` |
 
-All uplink messages are journaled in a persistent outbox (`~/.fusion-link/outbox.json`) and replayed until the broker acks them — events survive disconnects and crashes (FR-6). Reconnect uses exponential backoff with jitter (1s base, 60s cap).
+All uplink messages are journaled in a persistent outbox (`~/.fusion-link/outbox.json`) and replayed until the broker acks them — events survive disconnects and crashes (FR-6). Because the current broker does not ack heartbeats or task events, heartbeat entries are cleared on `hello_ack` and the journal is capped at 500 entries (oldest dropped first). Reconnect uses exponential backoff with jitter (1s base, 60s cap).
 
 ## Install
 
@@ -96,7 +96,7 @@ Default task route: `shell.chat` -> `POST http://127.0.0.1:11432/api/v1/shell/ch
 | `broker_url` | `wss://fusion-mlx.cn/link/ws` |
 | `bind_url` | `https://fusion-mlx.cn/api/link/bind` |
 | `gateway_url` | `http://127.0.0.1:11432` |
-| `heartbeat_secs` | `30` |
+| `heartbeat_secs` | `15` (broker read deadline is 30s; stay under it) |
 | `state_dir` | `~/.fusion-link` |
 | `task_routes` | `shell.chat` route |
 | `probes` | mlx :11434, gateway :11432, rag :11436, artifacts :11451, office :11485, office-api :11492 |
