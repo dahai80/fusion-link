@@ -10,7 +10,9 @@ env:
 
 jobs:
   check:
-    runs-on: macos-14
+    # macOS runners are minute-capped on this account; the crate itself is
+    # cross-platform, macOS-only keychain tests are cfg-gated in source.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

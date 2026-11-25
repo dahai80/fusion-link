@@ -90,6 +90,8 @@ pub fn device_fingerprint() -> Result<String, String> {
 mod tests {
     use super::*;
 
+    // macOS-only: security CLI + ioreg do not exist on Linux CI runners.
+    #[cfg(target_os = "macos")]
     #[test]
     fn fingerprint_is_deterministic_and_prefixed() {
         let fp1 = device_fingerprint().unwrap();
@@ -99,6 +101,7 @@ mod tests {
         assert_eq!(fp1.len(), 19);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn keychain_roundtrip() {
         let cred = Credential {
