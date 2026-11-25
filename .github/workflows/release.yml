@@ -91,8 +91,13 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - name: Collect wheels only
+        run: |
+          mkdir -p wheels
+          find artifacts -name '*.whl' -exec mv {} wheels/ \;
+          ls -la wheels/
       - name: Publish wheels to PyPI (trusted publishing)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: artifacts
+          packages-dir: wheels
           skip-existing: true
