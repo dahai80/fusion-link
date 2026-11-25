@@ -13,27 +13,30 @@ env:
 
 jobs:
   build:
+    # macOS hosted runners are unavailable on this account (jobs cancel/queue
+    # forever), so all targets are cross-compiled on ubuntu with cargo-zigbuild.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: macos-14, target: aarch64-apple-darwin }
-          - { os: macos-13, target: x86_64-apple-darwin }
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl }
-    runs-on: ${{ matrix.os }}
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+          - x86_64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Install musl toolchain (linux-musl target)
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
       - name: Build binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo zigbuild --release --target ${{ matrix.target }}
       - name: Package tarball
         run: |
           dir="fusion-link-${GITHUB_REF_NAME}-${{ matrix.target }}"
@@ -41,11 +44,11 @@ jobs:
           cp "target/${{ matrix.target }}/release/fusion-link" "$dir/"
           tar czf "$dir.tar.gz" "$dir"
           shasum -a 256 "$dir.tar.gz" > "$dir.tar.gz.sha256"
-      - name: Build wheel (maturin, bin binding)
+      - name: Build wheel (maturin, bin binding, zig linker)
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist
+          args: --release --zig --out dist
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.target }}
