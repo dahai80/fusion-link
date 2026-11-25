@@ -92,6 +92,51 @@ fn default_probes() -> Vec<ProbeCfg> {
     ]
 }
 
+fn merge_table(cfg: &mut Config, table: &toml::Table) -> Result<(), String> {
+    for (key, value) in table {
+        match key.as_str() {
+            "broker_url" => cfg.broker_url = str_field(value, key)?,
+            "bind_url" => cfg.bind_url = str_field(value, key)?,
+            "gateway_url" => cfg.gateway_url = str_field(value, key)?,
+            "gateway_token" => {
+                cfg.gateway_token = match value.as_str() {
+                    Some(v) => Some(v.to_string()),
+                    None => None,
+                }
+            }
+            "heartbeat_secs" => {
+                cfg.heartbeat_secs = value
+                    .as_integer()
+                    .filter(|n| *n >= 0)
+                    .map(|n| n as u64)
+                    .ok_or_else(|| format!("heartbeat_secs must be a non-negative integer"))?;
+            }
+            "state_dir" => cfg.state_dir = PathBuf::from(str_field(value, key)?),
+            "task_routes" => {
+                cfg.task_routes = value
+                    .clone()
+                    .try_into()
+                    .map_err(|e| format!("task_routes: {e}"))?;
+            }
+            "probes" => {
+                cfg.probes = value
+                    .clone()
+                    .try_into()
+                    .map_err(|e| format!("probes: {e}"))?;
+            }
+            other => return Err(format!("unknown config key '{other}'")),
+        }
+    }
+    Ok(())
+}
+
+fn str_field(value: &toml::Value, key: &str) -> Result<String, String> {
+    value
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("{key} must be a string"))
+}
+
 impl Config {
     pub fn load() -> Result<Self, String> {
         let mut cfg = Config::default();
@@ -99,11 +144,12 @@ impl Config {
         if path.exists() {
             let raw = std::fs::read_to_string(&path)
                 .map_err(|e| format!("config read failed {}: {e}", path.display()))?;
-            let file_cfg: Config = toml::from_str(&raw)
+            // Field-level merge over defaults: a partial config file (e.g. only
+            // broker_url) must not wipe unset collections like task_routes.
+            let table: toml::Table = toml::from_str(&raw)
                 .map_err(|e| format!("config parse failed {}: {e}", path.display()))?;
-            // File wins over defaults for fields it sets: merge via toml round-trip
-            // is lossy, so treat file as authoritative when present (documented).
-            cfg = file_cfg;
+            merge_table(&mut cfg, &table)
+                .map_err(|e| format!("config merge failed {}: {e}", path.display()))?;
             tracing::info!("config loaded from {}", path.display());
         }
         if let Ok(v) = std::env::var("FUSION_LINK_BROKER_URL") {
@@ -164,5 +210,33 @@ mod tests {
     fn env_overrides_apply() {
         // env override logic covered indirectly by load(); keep parse-safe test
         assert!("30".parse::<u64>().is_ok());
+    }
+
+    #[test]
+    fn partial_config_file_keeps_default_collections() {
+        // Real-world regression: a config.toml with only connection fields
+        // must not wipe default task_routes/probes.
+        let raw = r#"
+broker_url = "wss://example.org/ws"
+heartbeat_secs = 20
+"#;
+        let table: toml::Table = toml::from_str(raw).unwrap();
+        let mut cfg = Config::default();
+        merge_table(&mut cfg, &table).unwrap();
+        assert_eq!(cfg.broker_url, "wss://example.org/ws");
+        assert_eq!(cfg.heartbeat_secs, 20);
+        assert!(
+            cfg.task_routes.contains_key("shell.chat"),
+            "routes must survive partial file"
+        );
+        assert_eq!(cfg.probes.len(), 6, "probes must survive partial file");
+        assert!(cfg.gateway_url.contains("11432"));
+    }
+
+    #[test]
+    fn unknown_config_key_rejected() {
+        let table: toml::Table = toml::from_str("bogus_key = 1").unwrap();
+        let mut cfg = Config::default();
+        assert!(merge_table(&mut cfg, &table).is_err());
     }
 }
