@@ -89,6 +89,8 @@ fusion-link status
 
 网关任务鉴权：守护进程用设备凭证经 `POST {gateway_url}/api/v1/link/ticket`（仅回环，fusion-gateway #717 服务票据面）换取 ≤15 分钟短时票据，并以 `Authorization: Bearer <ticket>` 附带。若网关未启用票据面，回退到 `gateway_token`（或无鉴权）。任务中收到 401 会作为可见任务失败上报——绝不静默重试。
 
+Multipart 任务：`params` 含 `"_multipart": true` 时，守护进程发送 `multipart/form-data` 而非 JSON（office-api 文件端点要求）。`file_b64`（base64）作为 `file` 部分（文件名取 `file_name`，MIME 取 `file_mime`）；其余参数转为表单字段，非字符串值 JSON 编码。
+
 ## 配置
 
 `~/.fusion-link/config.toml`（所有键可选；文件存在时以文件为准）。环境变量覆盖：`FUSION_LINK_BROKER_URL`、`FUSION_LINK_BIND_URL`、`FUSION_LINK_GATEWAY_URL`、`FUSION_LINK_GATEWAY_TOKEN`、`FUSION_LINK_STATE_DIR`、`FUSION_LINK_HEARTBEAT_SECS`。

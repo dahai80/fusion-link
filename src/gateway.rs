@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::protocol::{TaskDispatchPayload, TaskState};
+use base64::Engine as _;
 use serde_json::Value;
 use std::time::Duration;
 
@@ -48,9 +49,35 @@ pub async fn execute(
         "dispatching task to local gateway"
     );
 
+    // Multipart contract (issue #11): when params carry `_multipart: true`,
+    // send a multipart/form-data body instead of JSON — required by
+    // office-api endpoints that take UploadFile / Form inputs.
+    // - `file_b64` (string, base64) becomes the `file` part,
+    //   named by `file_name` (default "file.bin"), typed by `file_mime`
+    //   (default application/octet-stream).
+    // - Every other param becomes a form field (non-strings JSON-encoded).
+    let multipart = dispatch
+        .params
+        .get("_multipart")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if multipart && method != "POST" {
+        return Err(TaskError::Unsupported(format!(
+            "multipart body requires POST, route method is '{}'",
+            route.method
+        )));
+    }
+
     let mut req = match method.as_str() {
         "GET" => client.get(&url),
-        "POST" => client.post(&url).json(&dispatch.params),
+        "POST" => {
+            if multipart {
+                let form = build_form(&dispatch.params)?;
+                client.post(&url).multipart(form)
+            } else {
+                client.post(&url).json(&dispatch.params)
+            }
+        }
         "PUT" => client.put(&url).json(&dispatch.params),
         _ => {
             return Err(TaskError::Unsupported(format!(
@@ -93,6 +120,48 @@ pub async fn execute(
     }
 }
 
+const META_KEYS: [&str; 4] = ["_multipart", "file_b64", "file_name", "file_mime"];
+
+fn build_form(params: &Value) -> Result<reqwest::multipart::Form, TaskError> {
+    let mut form = reqwest::multipart::Form::new();
+    if let Some(obj) = params.as_object() {
+        if let Some(b64) = obj.get("file_b64").and_then(Value::as_str) {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|e| {
+                    tracing::error!("file_b64 decode failed: {e}");
+                    TaskError::LocalFail(format!("file_b64 is not valid base64: {e}"))
+                })?;
+            let name = obj
+                .get("file_name")
+                .and_then(Value::as_str)
+                .unwrap_or("file.bin");
+            let mime = obj
+                .get("file_mime")
+                .and_then(Value::as_str)
+                .unwrap_or("application/octet-stream");
+            form = form.part(
+                "file",
+                reqwest::multipart::Part::bytes(bytes)
+                    .file_name(name.to_string())
+                    .mime_str(mime)
+                    .map_err(|e| TaskError::LocalFail(format!("invalid file_mime: {e}")))?,
+            );
+        }
+        for (key, value) in obj {
+            if META_KEYS.contains(&key.as_str()) {
+                continue;
+            }
+            let text = match value {
+                Value::String(s) => s.clone(),
+                other => serde_json::to_string(other).unwrap_or_default(),
+            };
+            form = form.text(key.clone(), text);
+        }
+    }
+    Ok(form)
+}
+
 fn summarize(body: &Value) -> String {
     match body {
         Value::String(s) => s.chars().take(200).collect(),
@@ -131,6 +200,22 @@ mod tests {
             TaskRoute {
                 method: "POST".to_string(),
                 path: "/api/v1/shell/chat/completions".to_string(),
+                timeout_secs: 5,
+            },
+        );
+        routes.insert(
+            "office.spreadsheet".to_string(),
+            TaskRoute {
+                method: "POST".to_string(),
+                path: "/shell/office-api/v1/xlsx/parse".to_string(),
+                timeout_secs: 5,
+            },
+        );
+        routes.insert(
+            "office.document".to_string(),
+            TaskRoute {
+                method: "POST".to_string(),
+                path: "/shell/office-api/v1/docx/write".to_string(),
                 timeout_secs: 5,
             },
         );
@@ -255,6 +340,92 @@ mod tests {
         match execute(&client(), &cfg, &dispatch("shell.chat"), Some("expired")).await {
             Err(TaskError::Auth(msg)) => assert!(msg.contains("401"), "{msg}"),
             other => panic!("expected Auth, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn multipart_body_sends_file_and_fields() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"content": "parsed"})),
+            )
+            .mount(&mock)
+            .await;
+        let cfg = test_cfg(&mock.uri());
+        let mut d = dispatch("office.spreadsheet");
+        d.params = serde_json::json!({
+            "_multipart": true,
+            "file_b64": base64::engine::general_purpose::STANDARD.encode(b"PK\x03\x04sheet"),
+            "file_name": "book.xlsx",
+            "file_mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "mode": "full",
+            "sheet": "",
+        });
+        let out = execute(&client(), &cfg, &d, Some("tk")).await.unwrap();
+        assert_eq!(out.summary.as_deref(), Some("parsed"));
+        let reqs = mock.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 1);
+        let ctype = reqs[0]
+            .headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(ctype.starts_with("multipart/form-data"), "{ctype}");
+        let body = String::from_utf8_lossy(&reqs[0].body).to_string();
+        assert!(
+            body.contains("name=\"file\"; filename=\"book.xlsx\""),
+            "{body}"
+        );
+        assert!(body.contains("name=\"mode\""), "{body}");
+        // meta keys must not leak into form fields
+        assert!(!body.contains("_multipart"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn multipart_without_file_only_form_fields() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock)
+            .await;
+        let cfg = test_cfg(&mock.uri());
+        let mut d = dispatch("office.document");
+        d.params = serde_json::json!({"_multipart": true, "markdown": "# hello"});
+        execute(&client(), &cfg, &d, None).await.unwrap();
+        let reqs = mock.received_requests().await.unwrap();
+        let body = String::from_utf8_lossy(&reqs[0].body).to_string();
+        assert!(body.contains("name=\"markdown\""), "{body}");
+        assert!(!body.contains("name=\"file\""), "{body}");
+    }
+
+    #[tokio::test]
+    async fn multipart_invalid_base64_maps_to_local_fail() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&mock)
+            .await;
+        let cfg = test_cfg(&mock.uri());
+        let mut d = dispatch("office.spreadsheet");
+        d.params = serde_json::json!({"_multipart": true, "file_b64": "!!!not-base64!!!"});
+        match execute(&client(), &cfg, &d, None).await {
+            Err(TaskError::LocalFail(msg)) => assert!(msg.contains("base64"), "{msg}"),
+            other => panic!("expected LocalFail, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn multipart_on_get_rejected() {
+        let mock = wiremock::MockServer::start().await;
+        let mut cfg = test_cfg(&mock.uri());
+        cfg.task_routes.get_mut("shell.chat").unwrap().method = "GET".into();
+        let mut d = dispatch("shell.chat");
+        d.params = serde_json::json!({"_multipart": true});
+        match execute(&client(), &cfg, &d, None).await {
+            Err(TaskError::Unsupported(msg)) => assert!(msg.contains("POST"), "{msg}"),
+            other => panic!("expected Unsupported, got {other:?}"),
         }
     }
 

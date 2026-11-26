@@ -89,6 +89,8 @@ Default task routes: `shell.chat` -> `POST /api/v1/shell/chat/completions`, plus
 
 For gateway tasks the daemon exchanges the device credential for a short-lived (<= 15m) service ticket via `POST {gateway_url}/api/v1/link/ticket` (loopback, fusion-gateway #717 plane) and attaches it as `Authorization: Bearer <ticket>`. If the ticket plane is not enabled on the gateway, the daemon falls back to `gateway_token` (or no auth). A 401 mid-task surfaces as a visible task failure — never a silent retry.
 
+Multipart tasks: when `params` contains `"_multipart": true`, the daemon sends `multipart/form-data` instead of JSON (required by office-api file endpoints). `file_b64` (base64) becomes the `file` part (named by `file_name`, typed by `file_mime`); all other params become form fields, JSON-encoded if not strings.
+
 ## Configuration
 
 `~/.fusion-link/config.toml` (all keys optional; file is authoritative when present). Env overrides: `FUSION_LINK_BROKER_URL`, `FUSION_LINK_BIND_URL`, `FUSION_LINK_GATEWAY_URL`, `FUSION_LINK_GATEWAY_TOKEN`, `FUSION_LINK_STATE_DIR`, `FUSION_LINK_HEARTBEAT_SECS`.
