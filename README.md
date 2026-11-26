@@ -85,7 +85,9 @@ fusion-link status
 ./start.sh stop
 ```
 
-Default task route: `shell.chat` -> `POST http://127.0.0.1:11432/api/v1/shell/chat/completions`. Unsupported task types are rejected with `E_UNSUPPORTED` and a reason (FR-3).
+Default task routes: `shell.chat` -> `POST /api/v1/shell/chat/completions`, plus office routes `office.spreadsheet` -> `/shell/office-api/v1/xlsx/parse`, `office.document` -> `/shell/office-api/v1/docx/write`, `office.slides` -> `/shell/office-api/v1/pptx/write` (all via `gateway_url`, 300s timeout). Unsupported task types are rejected with `E_UNSUPPORTED` and a reason (FR-3).
+
+For gateway tasks the daemon exchanges the device credential for a short-lived (<= 15m) service ticket via `POST {gateway_url}/api/v1/link/ticket` (loopback, fusion-gateway #717 plane) and attaches it as `Authorization: Bearer <ticket>`. If the ticket plane is not enabled on the gateway, the daemon falls back to `gateway_token` (or no auth). A 401 mid-task surfaces as a visible task failure — never a silent retry.
 
 ## Configuration
 
@@ -98,7 +100,7 @@ Default task route: `shell.chat` -> `POST http://127.0.0.1:11432/api/v1/shell/ch
 | `gateway_url` | `http://127.0.0.1:11432` |
 | `heartbeat_secs` | `15` (broker read deadline is 30s; stay under it) |
 | `state_dir` | `~/.fusion-link` |
-| `task_routes` | `shell.chat` route |
+| `task_routes` | `shell.chat` + 3 office routes |
 | `probes` | mlx :11434, gateway :11432, rag :11436, artifacts :11451, office :11485, office-api :11492 |
 
 Health snapshots carry service name + boolean status only (NFR-2); heartbeat stays under 1KB (NFR-3).

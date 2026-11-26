@@ -28,6 +28,11 @@ pub async fn run(cfg: Config, cred: Credential, shutdown: CancellationToken) -> 
     let outbox_path = outbox_path(&cfg.state_dir);
     let mut outbox = Outbox::load(outbox_path);
     let http = health::new_client();
+    let tickets = Arc::new(crate::ticket::TicketManager::new(
+        health::new_client(),
+        cfg.gateway_url.clone(),
+        cred.token.clone(),
+    ));
     let mut backoff = Backoff::new(RECONNECT_BASE_MS, RECONNECT_MAX_MS);
 
     info!(
@@ -42,7 +47,7 @@ pub async fn run(cfg: Config, cred: Credential, shutdown: CancellationToken) -> 
             info!("shutdown requested, session loop exiting");
             return Ok(());
         }
-        match run_once(&cfg, &cred, &mut outbox, &http, &shutdown).await {
+        match run_once(&cfg, &cred, &mut outbox, &http, &tickets, &shutdown).await {
             SessionEnd::Shutdown => {
                 info!("session ended gracefully");
                 return Ok(());
@@ -79,6 +84,7 @@ async fn run_once(
     cred: &Credential,
     outbox: &mut Outbox,
     http: &reqwest::Client,
+    tickets: &Arc<crate::ticket::TicketManager>,
     shutdown: &CancellationToken,
 ) -> SessionEnd {
     info!("connecting to broker {}", cfg.broker_url);
@@ -125,7 +131,7 @@ async fn run_once(
             incoming = stream.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        if let Err(e) = handle_text(cfg, cred, outbox, &mut sink, &up_tx, &text).await {
+                        if let Err(e) = handle_text(cfg, cred, outbox, &mut sink, &up_tx, tickets, &text).await {
                             return SessionEnd::Disconnected(format!("{CONNECTED_MARK} handle failed: {e}"));
                         }
                     }
@@ -224,6 +230,7 @@ async fn handle_text(
     outbox: &mut Outbox,
     sink: &mut futures_util::stream::SplitSink<WsStream, Message>,
     up_tx: &mpsc::UnboundedSender<Envelope>,
+    tickets: &Arc<crate::ticket::TicketManager>,
     text: &str,
 ) -> Result<(), String> {
     let env = match Envelope::from_json(text) {
@@ -269,6 +276,7 @@ async fn handle_text(
                 payload,
                 http_client(),
                 up_tx.clone(),
+                tickets.clone(),
             );
         }
         MsgType::ConfigUpdate => {
@@ -298,12 +306,35 @@ fn spawn_task_runner(
     dispatch: TaskDispatchPayload,
     http: Arc<reqwest::Client>,
     up_tx: mpsc::UnboundedSender<Envelope>,
+    tickets: Arc<crate::ticket::TicketManager>,
 ) {
     tokio::spawn(async move {
         let task_id = dispatch.task_id.clone();
         emit_event(&cred, &up_tx, &task_id, TaskState::Running, None, None);
 
-        match gateway::execute(&http, &cfg, &dispatch).await {
+        // Resolve auth: exchange device credential for a short-lived gateway
+        // ticket. PlaneDisabled / transport failure fall back to the static
+        // gateway_token path; a rejected credential is a visible task failure.
+        let bearer = match tickets.ticket(&task_id).await {
+            Ok(token) => Some(token),
+            Err(crate::ticket::TicketError::Rejected(reason)) => {
+                error!(task_id = %task_id, "ticket exchange rejected: {reason}");
+                fail_task(
+                    &cred,
+                    &up_tx,
+                    &task_id,
+                    ErrorCode::Auth,
+                    format!("device credential rejected by gateway: {reason}"),
+                );
+                return;
+            }
+            Err(e) => {
+                warn!(task_id = %task_id, "ticket exchange unavailable ({e:?}), falling back to static auth");
+                None
+            }
+        };
+
+        match gateway::execute(&http, &cfg, &dispatch, bearer.as_deref()).await {
             Ok(outcome) => {
                 emit_event(&cred, &up_tx, &task_id, outcome.state, None, None);
                 let payload = TaskResultPayload {
@@ -313,6 +344,11 @@ fn spawn_task_runner(
                     artifact_refs: outcome.artifact_refs,
                 };
                 send_uplink(&cred, &up_tx, MsgType::TaskResult, payload);
+            }
+            Err(gateway::TaskError::Auth(reason)) => {
+                // #717 semantics: never silently retry expired auth.
+                tickets.invalidate().await;
+                fail_task(&cred, &up_tx, &task_id, ErrorCode::Auth, reason);
             }
             Err(gateway::TaskError::Unsupported(reason)) => {
                 emit_event(
@@ -355,6 +391,32 @@ fn spawn_task_runner(
         }
         info!(task_id = %task_id, "task runner finished");
     });
+}
+
+fn fail_task(
+    cred: &Credential,
+    up_tx: &mpsc::UnboundedSender<Envelope>,
+    task_id: &str,
+    code: ErrorCode,
+    reason: String,
+) {
+    emit_event(
+        cred,
+        up_tx,
+        task_id,
+        TaskState::Failed,
+        None,
+        Some(reason.clone()),
+    );
+    send_uplink(
+        cred,
+        up_tx,
+        MsgType::Error,
+        ErrorPayload {
+            code,
+            message: reason,
+        },
+    );
 }
 
 fn emit_event(

@@ -85,7 +85,9 @@ fusion-link status
 ./start.sh stop
 ```
 
-默认任务路由：`shell.chat` -> `POST http://127.0.0.1:11432/api/v1/shell/chat/completions`。不支持的任务类型以 `E_UNSUPPORTED` + 原因明确拒绝（FR-3）。
+默认任务路由：`shell.chat` -> `POST /api/v1/shell/chat/completions`，以及办公路由 `office.spreadsheet` -> `/shell/office-api/v1/xlsx/parse`、`office.document` -> `/shell/office-api/v1/docx/write`、`office.slides` -> `/shell/office-api/v1/pptx/write`（均经 `gateway_url`，300 秒超时）。不支持的任务类型以 `E_UNSUPPORTED` + 原因明确拒绝（FR-3）。
+
+网关任务鉴权：守护进程用设备凭证经 `POST {gateway_url}/api/v1/link/ticket`（仅回环，fusion-gateway #717 服务票据面）换取 ≤15 分钟短时票据，并以 `Authorization: Bearer <ticket>` 附带。若网关未启用票据面，回退到 `gateway_token`（或无鉴权）。任务中收到 401 会作为可见任务失败上报——绝不静默重试。
 
 ## 配置
 
@@ -98,7 +100,7 @@ fusion-link status
 | `gateway_url` | `http://127.0.0.1:11432` |
 | `heartbeat_secs` | `15`（broker 读超时 30s，心跳必须小于它） |
 | `state_dir` | `~/.fusion-link` |
-| `task_routes` | `shell.chat` 路由 |
+| `task_routes` | `shell.chat` + 3 条办公路由 |
 | `probes` | mlx :11434、gateway :11432、rag :11436、artifacts :11451、office :11485、office-api :11492 |
 
 健康快照只含服务名 + 布尔状态（NFR-2）；心跳小于 1KB（NFR-3）。

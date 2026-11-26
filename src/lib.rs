@@ -6,3 +6,4 @@ pub mod keychain;
 pub mod outbox;
 pub mod protocol;
 pub mod session;
+pub mod ticket;

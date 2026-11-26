@@ -14,12 +14,16 @@ pub struct TaskOutcome {
 pub enum TaskError {
     Unsupported(String),
     LocalFail(String),
+    /// Gateway rejected auth (401). Per #717 semantics: visible failure,
+    /// never a silent retry.
+    Auth(String),
 }
 
 pub async fn execute(
     client: &reqwest::Client,
     cfg: &Config,
     dispatch: &TaskDispatchPayload,
+    bearer: Option<&str>,
 ) -> Result<TaskOutcome, TaskError> {
     let route = cfg.task_routes.get(&dispatch.task_type).ok_or_else(|| {
         tracing::warn!("unsupported task type: {}", dispatch.task_type);
@@ -55,13 +59,19 @@ pub async fn execute(
             )));
         }
     };
-    if let Some(token) = &cfg.gateway_token {
+    // Auth precedence: session ticket (link plane) > static gateway_token.
+    let token = bearer.or(cfg.gateway_token.as_deref());
+    if let Some(token) = token {
         req = req.bearer_auth(token);
     }
 
     match req.timeout(timeout).send().await {
         Ok(resp) => {
             let status = resp.status();
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                tracing::error!(task_id = %dispatch.task_id, "gateway rejected auth (401)");
+                return Err(TaskError::Auth("gateway auth rejected (401)".into()));
+            }
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
                 let snippet: String = body.chars().take(200).collect();
@@ -144,7 +154,7 @@ mod tests {
     async fn unsupported_type_rejected_without_http_call() {
         let mock = wiremock::MockServer::start().await;
         let cfg = test_cfg(&mock.uri());
-        let err = execute(&client(), &cfg, &dispatch("no.such.type"))
+        let err = execute(&client(), &cfg, &dispatch("no.such.type"), None)
             .await
             .unwrap_err();
         match err {
@@ -166,7 +176,7 @@ mod tests {
             .mount(&mock)
             .await;
         let cfg = test_cfg(&mock.uri());
-        let out = execute(&client(), &cfg, &dispatch("shell.chat"))
+        let out = execute(&client(), &cfg, &dispatch("shell.chat"), None)
             .await
             .unwrap();
         assert_eq!(out.state, TaskState::Succeeded);
@@ -181,7 +191,7 @@ mod tests {
             .mount(&mock)
             .await;
         let cfg = test_cfg(&mock.uri());
-        match execute(&client(), &cfg, &dispatch("shell.chat")).await {
+        match execute(&client(), &cfg, &dispatch("shell.chat"), None).await {
             Err(TaskError::LocalFail(msg)) => assert!(msg.contains("500"), "{msg}"),
             other => panic!("expected LocalFail, got {other:?}"),
         }
@@ -190,7 +200,7 @@ mod tests {
     #[tokio::test]
     async fn gateway_down_maps_to_local_fail() {
         let cfg = test_cfg("http://127.0.0.1:1");
-        match execute(&client(), &cfg, &dispatch("shell.chat")).await {
+        match execute(&client(), &cfg, &dispatch("shell.chat"), None).await {
             Err(TaskError::LocalFail(_)) => {}
             other => panic!("expected LocalFail, got {other:?}"),
         }
@@ -206,9 +216,46 @@ mod tests {
             .await;
         let mut cfg = test_cfg(&mock.uri());
         cfg.gateway_token = Some("tok-1".into());
-        execute(&client(), &cfg, &dispatch("shell.chat"))
+        execute(&client(), &cfg, &dispatch("shell.chat"), None)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_ticket_takes_precedence_over_gateway_token() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer ticket-9",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let mut cfg = test_cfg(&mock.uri());
+        cfg.gateway_token = Some("static-token".into());
+        execute(&client(), &cfg, &dispatch("shell.chat"), Some("ticket-9"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn gateway_401_maps_to_auth() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(401).set_body_json(
+                    serde_json::json!({"code": "E_AUTH", "detail": "ticket expired"}),
+                ),
+            )
+            .mount(&mock)
+            .await;
+        let cfg = test_cfg(&mock.uri());
+        match execute(&client(), &cfg, &dispatch("shell.chat"), Some("expired")).await {
+            Err(TaskError::Auth(msg)) => assert!(msg.contains("401"), "{msg}"),
+            other => panic!("expected Auth, got {other:?}"),
+        }
     }
 
     fn client() -> reqwest::Client {

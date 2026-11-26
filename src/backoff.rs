@@ -53,7 +53,8 @@ mod tests {
             assert!(*d <= 60_000 + 200, "delay exceeded cap: {d}");
         }
         let last = *delays.last().unwrap();
-        assert!(last >= 50_000, "expected near-cap delay, got {last}");
+        // Jitter floor is 0.8x cap, so 48_000 is the deterministic minimum.
+        assert!(last >= 48_000, "expected near-cap delay, got {last}");
     }
 
     #[test]

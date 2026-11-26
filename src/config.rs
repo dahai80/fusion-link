@@ -42,6 +42,22 @@ impl Default for Config {
                 timeout_secs: 300,
             },
         );
+        // office-api routes (issue #10): served via fusion-gateway
+        // /shell/office-api proxy, auth via link service ticket.
+        for (name, path) in [
+            ("office.spreadsheet", "/shell/office-api/v1/xlsx/parse"),
+            ("office.document", "/shell/office-api/v1/docx/write"),
+            ("office.slides", "/shell/office-api/v1/pptx/write"),
+        ] {
+            task_routes.insert(
+                name.to_string(),
+                TaskRoute {
+                    method: "POST".to_string(),
+                    path: path.to_string(),
+                    timeout_secs: 300,
+                },
+            );
+        }
         Self {
             broker_url: "wss://fusion-mlx.cn/link/ws".to_string(),
             bind_url: "https://fusion-mlx.cn/api/link/bind".to_string(),
@@ -99,17 +115,14 @@ fn merge_table(cfg: &mut Config, table: &toml::Table) -> Result<(), String> {
             "bind_url" => cfg.bind_url = str_field(value, key)?,
             "gateway_url" => cfg.gateway_url = str_field(value, key)?,
             "gateway_token" => {
-                cfg.gateway_token = match value.as_str() {
-                    Some(v) => Some(v.to_string()),
-                    None => None,
-                }
+                cfg.gateway_token = value.as_str().map(|v| v.to_string());
             }
             "heartbeat_secs" => {
                 cfg.heartbeat_secs = value
                     .as_integer()
                     .filter(|n| *n >= 0)
                     .map(|n| n as u64)
-                    .ok_or_else(|| format!("heartbeat_secs must be a non-negative integer"))?;
+                    .ok_or_else(|| "heartbeat_secs must be a non-negative integer".to_string())?;
             }
             "state_dir" => cfg.state_dir = PathBuf::from(str_field(value, key)?),
             "task_routes" => {
@@ -204,6 +217,9 @@ mod tests {
         assert!(urls.iter().any(|u| u.contains("11451")));
         assert!(urls.iter().any(|u| u.contains("11492")));
         assert!(cfg.task_routes.contains_key("shell.chat"));
+        assert!(cfg.task_routes.contains_key("office.spreadsheet"));
+        assert!(cfg.task_routes.contains_key("office.document"));
+        assert!(cfg.task_routes.contains_key("office.slides"));
     }
 
     #[test]
