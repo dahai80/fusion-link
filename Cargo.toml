@@ -1,6 +1,6 @@
 [package]
 name = "fusion-link"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 license = "Apache-2.0"
 description = "Local-first connection daemon: outbound WSS to cloud broker, task relay to local fusion-gateway"
