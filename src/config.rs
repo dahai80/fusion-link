@@ -8,6 +8,12 @@ pub struct TaskRoute {
     pub path: String,
     #[serde(default)]
     pub timeout_secs: u64,
+    // Rewrite a flat "prompt" param into an OpenAI messages body
+    // (issue #12): cloud-semantic LLM tasks (summarize/generate/analyze)
+    // carry {prompt}; /api/v1/shell/chat/completions expects
+    // {"messages":[{"role":"user","content":prompt}]}.
+    #[serde(default)]
+    pub prompt_to_messages: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,8 +46,24 @@ impl Default for Config {
                 method: "POST".to_string(),
                 path: "/api/v1/shell/chat/completions".to_string(),
                 timeout_secs: 300,
+                prompt_to_messages: false,
             },
         );
+        // Cloud-semantic LLM task types dispatched by the console
+        // (fusion-site TASK_TYPES, issue #12): they carry a flat "prompt"
+        // param and execute on the same chat completions plane; the route
+        // flag rewrites it into an OpenAI messages body.
+        for name in ["summarize", "generate", "analyze"] {
+            task_routes.insert(
+                name.to_string(),
+                TaskRoute {
+                    method: "POST".to_string(),
+                    path: "/api/v1/shell/chat/completions".to_string(),
+                    timeout_secs: 300,
+                    prompt_to_messages: true,
+                },
+            );
+        }
         // office-api routes (issue #10): served via fusion-gateway
         // /shell/office-api proxy, auth via link service ticket.
         for (name, path) in [
@@ -55,6 +77,7 @@ impl Default for Config {
                     method: "POST".to_string(),
                     path: path.to_string(),
                     timeout_secs: 300,
+                    prompt_to_messages: false,
                 },
             );
         }
@@ -220,6 +243,14 @@ mod tests {
         assert!(cfg.task_routes.contains_key("office.spreadsheet"));
         assert!(cfg.task_routes.contains_key("office.document"));
         assert!(cfg.task_routes.contains_key("office.slides"));
+        for name in ["summarize", "generate", "analyze"] {
+            let route = cfg
+                .task_routes
+                .get(name)
+                .unwrap_or_else(|| panic!("missing default route {name}"));
+            assert!(route.prompt_to_messages, "{name} must rewrite prompt");
+            assert!(route.path.contains("chat/completions"));
+        }
     }
 
     #[test]

@@ -1,10 +1,9 @@
-use fusion_link::config::{Config, TaskRoute};
+use fusion_link::config::Config;
 use fusion_link::keychain::Credential;
 use fusion_link::protocol::{
     AckPayload, Envelope, MsgType, TaskDispatchPayload, TaskEventPayload, TaskResultPayload,
 };
 use futures_util::{SinkExt, StreamExt};
-use std::collections::HashMap;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_tungstenite::WebSocketStream;
@@ -112,25 +111,18 @@ async fn read_envelope(
 }
 
 fn test_config(broker_url: &str, gateway_url: &str, state_dir: std::path::PathBuf) -> Config {
-    let mut routes = HashMap::new();
-    routes.insert(
-        "shell.chat".to_string(),
-        TaskRoute {
-            method: "POST".to_string(),
-            path: "/api/v1/shell/chat/completions".to_string(),
-            timeout_secs: 10,
-        },
-    );
-    Config {
+    let mut cfg = Config {
         broker_url: broker_url.to_string(),
         bind_url: "http://127.0.0.1:1/bind".to_string(),
         gateway_url: gateway_url.to_string(),
-        gateway_token: None,
-        heartbeat_secs: 1,
         state_dir,
-        task_routes: routes,
-        probes: Vec::new(),
+        heartbeat_secs: 1,
+        ..Default::default()
+    };
+    for route in cfg.task_routes.values_mut() {
+        route.timeout_secs = 10;
     }
+    cfg
 }
 
 #[tokio::test]

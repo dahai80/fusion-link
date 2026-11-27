@@ -74,6 +74,8 @@ pub async fn execute(
             if multipart {
                 let form = build_form(&dispatch.params)?;
                 client.post(&url).multipart(form)
+            } else if route.prompt_to_messages {
+                client.post(&url).json(&rewrite_prompt(&dispatch.params))
             } else {
                 client.post(&url).json(&dispatch.params)
             }
@@ -121,6 +123,30 @@ pub async fn execute(
 }
 
 const META_KEYS: [&str; 4] = ["_multipart", "file_b64", "file_name", "file_mime"];
+
+// Issue #12: cloud-semantic tasks carry a flat "prompt" string; the chat
+// completions plane speaks OpenAI. Rewrite {prompt, ...rest} into
+// {"messages":[{"role":"user","content":prompt}], ...rest}; other params
+// pass through untouched. Without a "prompt" the params go unchanged.
+fn rewrite_prompt(params: &Value) -> Value {
+    let Some(obj) = params.as_object() else {
+        return params.clone();
+    };
+    let Some(prompt) = obj.get("prompt").and_then(Value::as_str) else {
+        return params.clone();
+    };
+    let mut out = serde_json::Map::new();
+    out.insert(
+        "messages".to_string(),
+        serde_json::json!([{"role": "user", "content": prompt}]),
+    );
+    for (key, value) in obj {
+        if key != "prompt" {
+            out.insert(key.clone(), value.clone());
+        }
+    }
+    Value::Object(out)
+}
 
 fn build_form(params: &Value) -> Result<reqwest::multipart::Form, TaskError> {
     let mut form = reqwest::multipart::Form::new();
@@ -190,40 +216,16 @@ fn summarize(body: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::TaskRoute;
-    use std::collections::HashMap;
 
     fn test_cfg(url: &str) -> Config {
-        let mut routes = HashMap::new();
-        routes.insert(
-            "shell.chat".to_string(),
-            TaskRoute {
-                method: "POST".to_string(),
-                path: "/api/v1/shell/chat/completions".to_string(),
-                timeout_secs: 5,
-            },
-        );
-        routes.insert(
-            "office.spreadsheet".to_string(),
-            TaskRoute {
-                method: "POST".to_string(),
-                path: "/shell/office-api/v1/xlsx/parse".to_string(),
-                timeout_secs: 5,
-            },
-        );
-        routes.insert(
-            "office.document".to_string(),
-            TaskRoute {
-                method: "POST".to_string(),
-                path: "/shell/office-api/v1/docx/write".to_string(),
-                timeout_secs: 5,
-            },
-        );
-        Config {
+        let mut cfg = Config {
             gateway_url: url.to_string(),
-            task_routes: routes,
             ..Default::default()
+        };
+        for route in cfg.task_routes.values_mut() {
+            route.timeout_secs = 5;
         }
+        cfg
     }
 
     fn dispatch(task_type: &str) -> TaskDispatchPayload {
@@ -437,5 +439,57 @@ mod tests {
     fn summarize_prefers_known_keys() {
         let body = serde_json::json!({"id": "x1", "content": "main text"});
         assert_eq!(summarize(&body), "main text");
+    }
+
+    #[test]
+    fn rewrite_prompt_builds_openai_messages() {
+        let out = rewrite_prompt(&serde_json::json!({
+            "prompt": "summarize this",
+            "artifact_mode": "index+preview",
+        }));
+        assert_eq!(
+            out,
+            serde_json::json!({
+                "messages": [{"role": "user", "content": "summarize this"}],
+                "artifact_mode": "index+preview",
+            })
+        );
+    }
+
+    #[test]
+    fn rewrite_prompt_passthrough_without_prompt() {
+        let p = serde_json::json!({"content": "already openai"});
+        assert_eq!(rewrite_prompt(&p), p);
+        let p2 = serde_json::json!("bare string");
+        assert_eq!(rewrite_prompt(&p2), p2);
+        // non-string prompt values pass through unchanged
+        let p3 = serde_json::json!({"prompt": 42});
+        assert_eq!(rewrite_prompt(&p3), p3);
+    }
+
+    #[tokio::test]
+    async fn cloud_semantic_task_rewrites_prompt_to_messages() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v1/shell/chat/completions"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"content": "done"})),
+            )
+            .mount(&mock)
+            .await;
+        let cfg = test_cfg(&mock.uri());
+        let mut d = dispatch("summarize");
+        d.params = serde_json::json!({"prompt": "shorten me", "confirm": "local"});
+        let out = execute(&client(), &cfg, &d, Some("tk")).await.unwrap();
+        assert_eq!(out.state, TaskState::Succeeded);
+        let reqs = mock.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(
+            body["messages"][0],
+            serde_json::json!({"role": "user", "content": "shorten me"})
+        );
+        assert_eq!(body["confirm"], "local");
+        assert!(body.get("prompt").is_none());
     }
 }
