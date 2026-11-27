@@ -131,7 +131,7 @@ async fn run_once(
             incoming = stream.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        if let Err(e) = handle_text(cfg, cred, outbox, &mut sink, &up_tx, tickets, &text).await {
+                        if let Err(e) = handle_text(cfg, cred, outbox, &mut sink, &up_tx, tickets, shutdown, &text).await {
                             return SessionEnd::Disconnected(format!("{CONNECTED_MARK} handle failed: {e}"));
                         }
                     }
@@ -224,6 +224,7 @@ async fn replay_pending(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_text(
     cfg: &Config,
     cred: &Credential,
@@ -231,6 +232,7 @@ async fn handle_text(
     sink: &mut futures_util::stream::SplitSink<WsStream, Message>,
     up_tx: &mpsc::UnboundedSender<Envelope>,
     tickets: &Arc<crate::ticket::TicketManager>,
+    shutdown: &CancellationToken,
     text: &str,
 ) -> Result<(), String> {
     let env = match Envelope::from_json(text) {
@@ -277,6 +279,7 @@ async fn handle_text(
                 http_client(),
                 up_tx.clone(),
                 tickets.clone(),
+                shutdown.clone(),
             );
         }
         MsgType::ConfigUpdate => {
@@ -307,10 +310,66 @@ fn spawn_task_runner(
     http: Arc<reqwest::Client>,
     up_tx: mpsc::UnboundedSender<Envelope>,
     tickets: Arc<crate::ticket::TicketManager>,
+    shutdown: CancellationToken,
 ) {
     tokio::spawn(async move {
         let task_id = dispatch.task_id.clone();
         emit_event(&cred, &up_tx, &task_id, TaskState::Running, None, None);
+
+        // FR-8 confirm gate (issue #13): write-ops pause at a local
+        // confirmation point before touching the gateway. Cloud stays
+        // status-only; approval is a local CLI decision.
+        if crate::confirm::requires_confirm(&dispatch.params)
+            && crate::confirm::valid_task_id(&task_id)
+        {
+            emit_event(
+                &cred,
+                &up_tx,
+                &task_id,
+                TaskState::AwaitingLocalConfirm,
+                None,
+                Some("waiting for local confirmation".to_string()),
+            );
+            crate::confirm::post_request(&cfg.state_dir, &task_id, &dispatch.task_type);
+            crate::confirm::notify(&task_id, &dispatch.task_type, &cfg.state_dir);
+            info!(task_id = %task_id, "task paused at local confirmation point");
+            let decision = crate::confirm::wait_decision(
+                &cfg.state_dir,
+                &task_id,
+                cfg.confirm_timeout_secs,
+                &shutdown,
+            )
+            .await;
+            if !decision.approved {
+                error!(task_id = %task_id, "task denied at confirm point: {}", decision.reason);
+                fail_task(
+                    &cred,
+                    &up_tx,
+                    &task_id,
+                    ErrorCode::Denied,
+                    decision.reason.clone(),
+                );
+                gateway::report_outcome(
+                    &http,
+                    &cfg.outcomes_url,
+                    &task_id,
+                    &dispatch.task_type,
+                    &dispatch.params,
+                    "user_rejected",
+                )
+                .await;
+                return;
+            }
+            info!(task_id = %task_id, "task approved locally, resuming");
+            emit_event(
+                &cred,
+                &up_tx,
+                &task_id,
+                TaskState::Running,
+                None,
+                Some("local confirmation approved".to_string()),
+            );
+        }
 
         // Resolve auth: exchange device credential for a short-lived gateway
         // ticket. PlaneDisabled / transport failure fall back to the static
@@ -326,6 +385,15 @@ fn spawn_task_runner(
                     ErrorCode::Auth,
                     format!("device credential rejected by gateway: {reason}"),
                 );
+                gateway::report_outcome(
+                    &http,
+                    &cfg.outcomes_url,
+                    &task_id,
+                    &dispatch.task_type,
+                    &dispatch.params,
+                    "error",
+                )
+                .await;
                 return;
             }
             Err(e) => {
@@ -334,8 +402,12 @@ fn spawn_task_runner(
             }
         };
 
+        // Issue #14: every terminal state reports an outcome record so
+        // cloud-dispatched trajectories reach the local training sink.
+        let mut signal = "error";
         match gateway::execute(&http, &cfg, &dispatch, bearer.as_deref()).await {
             Ok(outcome) => {
+                signal = "task_success";
                 emit_event(&cred, &up_tx, &task_id, outcome.state, None, None);
                 let payload = TaskResultPayload {
                     task_id: task_id.clone(),
@@ -389,6 +461,15 @@ fn spawn_task_runner(
                 );
             }
         }
+        gateway::report_outcome(
+            &http,
+            &cfg.outcomes_url,
+            &task_id,
+            &dispatch.task_type,
+            &dispatch.params,
+            signal,
+        )
+        .await;
         info!(task_id = %task_id, "task runner finished");
     });
 }

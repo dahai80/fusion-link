@@ -31,6 +31,13 @@ pub struct Config {
     pub gateway_token: Option<String>,
     pub heartbeat_secs: u64,
     pub state_dir: PathBuf,
+    // Local office-api rollout sink (issue #14); loopback only.
+    #[serde(default)]
+    pub outcomes_url: String,
+    // How long a task may sit at the local confirmation point (FR-8,
+    // issue #13) before it is auto-denied.
+    #[serde(default)]
+    pub confirm_timeout_secs: u64,
     #[serde(default)]
     pub task_routes: HashMap<String, TaskRoute>,
     #[serde(default)]
@@ -90,6 +97,8 @@ impl Default for Config {
             // Stay strictly under it (verified stable at 15 on prod).
             heartbeat_secs: 15,
             state_dir: default_state_dir(),
+            outcomes_url: "http://127.0.0.1:11492/v1/outcomes".to_string(),
+            confirm_timeout_secs: 3600,
             task_routes,
             probes: default_probes(),
         }
@@ -148,6 +157,14 @@ fn merge_table(cfg: &mut Config, table: &toml::Table) -> Result<(), String> {
                     .ok_or_else(|| "heartbeat_secs must be a non-negative integer".to_string())?;
             }
             "state_dir" => cfg.state_dir = PathBuf::from(str_field(value, key)?),
+            "outcomes_url" => cfg.outcomes_url = str_field(value, key)?,
+            "confirm_timeout_secs" => {
+                cfg.confirm_timeout_secs = value
+                    .as_integer()
+                    .filter(|n| *n > 0)
+                    .map(|n| n as u64)
+                    .ok_or_else(|| "confirm_timeout_secs must be a positive integer".to_string())?;
+            }
             "task_routes" => {
                 cfg.task_routes = value
                     .clone()
@@ -202,6 +219,14 @@ impl Config {
         }
         if let Ok(v) = std::env::var("FUSION_LINK_STATE_DIR") {
             cfg.state_dir = PathBuf::from(v);
+        }
+        if let Ok(v) = std::env::var("FUSION_LINK_OUTCOMES_URL") {
+            cfg.outcomes_url = v;
+        }
+        if let Ok(v) = std::env::var("FUSION_LINK_CONFIRM_TIMEOUT_SECS")
+            && let Ok(n) = v.parse()
+        {
+            cfg.confirm_timeout_secs = n;
         }
         if let Ok(v) = std::env::var("FUSION_LINK_HEARTBEAT_SECS")
             && let Ok(n) = v.parse()

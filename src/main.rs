@@ -31,6 +31,12 @@ enum Command {
     Status,
     /// Run the daemon (foreground; managed by fusion-sv / start.sh)
     Run,
+    /// Answer a pending local confirmation (FR-8): approve or deny a paused task
+    Confirm {
+        task_id: String,
+        #[arg(value_parser = ["approve", "deny"])]
+        decision: String,
+    },
 }
 
 fn init_logging() {
@@ -70,6 +76,14 @@ async fn main() {
         Command::Run => {
             if let Err(e) = cmd_run().await {
                 eprintln!("run failed: {e}");
+                std::process::exit(1);
+            }
+            0
+        }
+        Command::Confirm { task_id, decision } => {
+            let approve = decision == "approve";
+            if let Err(e) = cmd_confirm(&task_id, approve) {
+                eprintln!("confirm failed: {e}");
                 std::process::exit(1);
             }
             0
@@ -163,6 +177,16 @@ async fn cmd_run() -> Result<(), String> {
         cancel.cancel();
     });
     session::run(cfg, cred, token).await
+}
+
+fn cmd_confirm(task_id: &str, approve: bool) -> Result<(), String> {
+    fusion_link::confirm::write_decision(&Config::load()?.state_dir, task_id, approve)?;
+    println!(
+        "decision recorded: {} {}",
+        if approve { "approve" } else { "deny" },
+        task_id
+    );
+    Ok(())
 }
 
 fn hostname() -> String {

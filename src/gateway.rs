@@ -107,12 +107,37 @@ pub async fn execute(
                 tracing::error!(task_id = %dispatch.task_id, "gateway returned http error: status={status} body={snippet}");
                 return Err(TaskError::LocalFail(format!("gateway http {status}")));
             }
-            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            // Parse only JSON responses (issue #15): raw-byte write endpoints
+            // legitimately return binary bodies; treat those as empty output.
+            let is_json = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|c| c.contains("json"));
+            let body: Value = if is_json {
+                resp.json().await.unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            };
+            // Artifact extraction (issue #15): fusion-office emits an
+            // "artifact" object when artifact_mode=index+preview; map it
+            // into the outcome so the broker task detail carries it.
+            let artifact_refs = body
+                .get("artifact")
+                .map(|a| vec![a.clone()])
+                .unwrap_or_default();
+            if !artifact_refs.is_empty() {
+                tracing::info!(task_id = %dispatch.task_id, "task produced an artifact");
+            }
             tracing::info!(task_id = %dispatch.task_id, "gateway task completed successfully");
             Ok(TaskOutcome {
                 state: TaskState::Succeeded,
-                summary: Some(summarize(&body)),
-                artifact_refs: Vec::new(),
+                summary: if is_json {
+                    Some(summarize(&body))
+                } else {
+                    None
+                },
+                artifact_refs,
             })
         }
         Err(e) => {
@@ -123,6 +148,53 @@ pub async fn execute(
 }
 
 const META_KEYS: [&str; 4] = ["_multipart", "file_b64", "file_name", "file_mime"];
+
+// Issue #14: report a rollout-tap outcome record for every executed task
+// (success AND failure) so cloud-dispatched trajectories reach the local
+// training sink (office-api POST /v1/outcomes, fusion-office#33). Signals
+// must match the sink's SIGNAL_SCORES: task_success / user_rejected / error.
+// Fire-and-forget: an outcome sink failure never fails the task.
+pub async fn report_outcome(
+    client: &reqwest::Client,
+    outcomes_url: &str,
+    task_id: &str,
+    task_type: &str,
+    params: &Value,
+    signal: &str,
+) {
+    let transcript = params
+        .get("prompt")
+        .and_then(Value::as_str)
+        .map(|s| s.chars().take(500).collect::<String>())
+        .unwrap_or_else(|| format!("{task_type} task executed on device"));
+    let record = serde_json::json!({
+        "schema_version": 2,
+        "rollout_id": task_id,
+        "model": format!("link-task:{task_type}"),
+        "messages": [{"role": "user", "content": transcript}],
+        "outcome": {"signal": signal},
+    });
+    let resp = client
+        .post(outcomes_url)
+        .json(&record)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await;
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            tracing::info!(task_id = %task_id, "outcome reported (signal={signal})");
+        }
+        Ok(r) => {
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            let snippet: String = body.chars().take(120).collect();
+            tracing::warn!(task_id = %task_id, "outcome sink rejected record: http {status} {snippet}");
+        }
+        Err(e) => {
+            tracing::warn!(task_id = %task_id, "outcome sink unreachable: {e}");
+        }
+    }
+}
 
 // Issue #12: cloud-semantic tasks carry a flat "prompt" string; the chat
 // completions plane speaks OpenAI. Rewrite {prompt, ...rest} into
@@ -439,6 +511,89 @@ mod tests {
     fn summarize_prefers_known_keys() {
         let body = serde_json::json!({"id": "x1", "content": "main text"});
         assert_eq!(summarize(&body), "main text");
+    }
+
+    #[tokio::test]
+    async fn artifact_object_maps_into_outcome() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "content": "parsed",
+                    "artifact": {"kind": "xlsx.index", "refs": ["sheet://1"]}
+                })),
+            )
+            .mount(&mock)
+            .await;
+        let cfg = test_cfg(&mock.uri());
+        let out = execute(&client(), &cfg, &dispatch("office.spreadsheet"), None)
+            .await
+            .unwrap();
+        assert_eq!(out.artifact_refs.len(), 1);
+        assert_eq!(out.artifact_refs[0]["kind"], "xlsx.index");
+    }
+
+    #[tokio::test]
+    async fn non_json_response_yields_empty_artifacts() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/octet-stream")
+                    .set_body_bytes(b"PK\x03\x04binary".to_vec()),
+            )
+            .mount(&mock)
+            .await;
+        let cfg = test_cfg(&mock.uri());
+        let out = execute(&client(), &cfg, &dispatch("office.slides"), None)
+            .await
+            .unwrap();
+        assert_eq!(out.state, TaskState::Succeeded);
+        assert!(out.artifact_refs.is_empty());
+        assert_eq!(out.summary, None);
+    }
+
+    #[tokio::test]
+    async fn outcome_record_posted_to_sink() {
+        let sink = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/outcomes"))
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "schema_version": 2,
+                "rollout_id": "t-1",
+                "model": "link-task:office.spreadsheet",
+                "messages": [{"role": "user", "content": "shorten me"}],
+                "outcome": {"signal": "task_success"}
+            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(202)
+                    .set_body_json(serde_json::json!({"accepted": "t-1"})),
+            )
+            .expect(1)
+            .mount(&sink)
+            .await;
+        report_outcome(
+            &client(),
+            &format!("{}/v1/outcomes", sink.uri()),
+            "t-1",
+            "office.spreadsheet",
+            &serde_json::json!({"prompt": "shorten me"}),
+            "task_success",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn outcome_sink_unreachable_never_panics() {
+        report_outcome(
+            &client(),
+            "http://127.0.0.1:1/v1/outcomes",
+            "t-x",
+            "shell.chat",
+            &serde_json::json!({}),
+            "error",
+        )
+        .await;
     }
 
     #[test]

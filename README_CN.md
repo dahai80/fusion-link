@@ -91,6 +91,12 @@ fusion-link status
 
 Multipart 任务：`params` 含 `"_multipart": true` 时，守护进程发送 `multipart/form-data` 而非 JSON（office-api 文件端点要求）。`file_b64`（base64）作为 `file` 部分（文件名取 `file_name`，MIME 取 `file_mime`）；其余参数转为表单字段，非字符串值 JSON 编码。
 
+本地确认（FR-8）：`params` 含 `confirm: "local"`（或 `confirm_required: true`）的任务在派发前暂停，向 broker 上报 `awaiting_local_confirm`；守护进程发 macOS 通知，等待 `fusion-link confirm <task_id> approve|deny`（超过 `confirm_timeout_secs`，默认 3600 秒自动拒绝）。拒绝/超时以 `E_DENIED` 判任务失败。云端仅显示状态——不存在云端批准路径。
+
+Outcome 上报：每个任务执行完毕（成功或失败）都会向本地 office-api sink（`outcomes_url`，默认 `http://127.0.0.1:11492/v1/outcomes`）上报 rollout-tap 记录，使云端派发的轨迹进入训练回路。信号：`task_success` / `user_rejected`（确认被拒）/ `error`。
+
+Artifact：网关响应含 `artifact` 对象时映射进 `task.result.artifact_refs`，供控制台 artifact 库展示。
+
 ## 配置
 
 `~/.fusion-link/config.toml`（所有键可选；文件存在时以文件为准）。环境变量覆盖：`FUSION_LINK_BROKER_URL`、`FUSION_LINK_BIND_URL`、`FUSION_LINK_GATEWAY_URL`、`FUSION_LINK_GATEWAY_TOKEN`、`FUSION_LINK_STATE_DIR`、`FUSION_LINK_HEARTBEAT_SECS`。
@@ -102,6 +108,8 @@ Multipart 任务：`params` 含 `"_multipart": true` 时，守护进程发送 `m
 | `gateway_url` | `http://127.0.0.1:11432` |
 | `heartbeat_secs` | `15`（broker 读超时 30s，心跳必须小于它） |
 | `state_dir` | `~/.fusion-link` |
+| `outcomes_url` | `http://127.0.0.1:11492/v1/outcomes` |
+| `confirm_timeout_secs` | `3600`（FR-8 本地确认自动拒绝） |
 | `task_routes` | `shell.chat` + 3 条 LLM 别名 + 3 条办公路由 |
 | `probes` | mlx :11434、gateway :11432、rag :11436、artifacts :11451、office :11485、office-api :11492 |
 

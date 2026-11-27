@@ -1,5 +1,6 @@
 pub mod backoff;
 pub mod config;
+pub mod confirm;
 pub mod gateway;
 pub mod health;
 pub mod keychain;

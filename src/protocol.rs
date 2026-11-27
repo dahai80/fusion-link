@@ -39,6 +39,9 @@ pub enum ErrorCode {
     Unsupported,
     #[serde(rename = "E_LOCAL_FAIL")]
     LocalFail,
+    // FR-8 (issue #13): local confirmation point denied or timed out.
+    #[serde(rename = "E_DENIED")]
+    Denied,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -91,6 +91,12 @@ For gateway tasks the daemon exchanges the device credential for a short-lived (
 
 Multipart tasks: when `params` contains `"_multipart": true`, the daemon sends `multipart/form-data` instead of JSON (required by office-api file endpoints). `file_b64` (base64) becomes the `file` part (named by `file_name`, typed by `file_mime`); all other params become form fields, JSON-encoded if not strings.
 
+Local confirmation (FR-8): tasks whose params carry `confirm: "local"` (or `confirm_required: true`) pause before dispatch with `awaiting_local_confirm` uplinked to the broker; a macOS notification is posted and the task waits for `fusion-link confirm <task_id> approve|deny` (or auto-denies after `confirm_timeout_secs`, default 3600). Deny/timeout fails the task with `E_DENIED`. Cloud stays status-only — no cloud approve path exists.
+
+Outcomes: every executed task reports a rollout-tap record (success or failure) to the local office-api sink (`outcomes_url`, default `http://127.0.0.1:11492/v1/outcomes`) so cloud-dispatched trajectories reach the training loop. Signals: `task_success` / `user_rejected` (denied confirm) / `error`.
+
+Artifacts: when a gateway response contains an `artifact` object, it is mapped into `task.result.artifact_refs` so the console artifact library can display it.
+
 ## Configuration
 
 `~/.fusion-link/config.toml` (all keys optional; file is authoritative when present). Env overrides: `FUSION_LINK_BROKER_URL`, `FUSION_LINK_BIND_URL`, `FUSION_LINK_GATEWAY_URL`, `FUSION_LINK_GATEWAY_TOKEN`, `FUSION_LINK_STATE_DIR`, `FUSION_LINK_HEARTBEAT_SECS`.
@@ -102,6 +108,8 @@ Multipart tasks: when `params` contains `"_multipart": true`, the daemon sends `
 | `gateway_url` | `http://127.0.0.1:11432` |
 | `heartbeat_secs` | `15` (broker read deadline is 30s; stay under it) |
 | `state_dir` | `~/.fusion-link` |
+| `outcomes_url` | `http://127.0.0.1:11492/v1/outcomes` |
+| `confirm_timeout_secs` | `3600` (FR-8 local confirmation auto-deny) |
 | `task_routes` | `shell.chat` + 3 LLM aliases + 3 office routes |
 | `probes` | mlx :11434, gateway :11432, rag :11436, artifacts :11451, office :11485, office-api :11492 |
 
